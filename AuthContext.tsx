@@ -269,97 +269,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const [tradeSettings, setTradeSettings] = useState<TradeSettings>(DEFAULT_TRADE_SETTINGS);
     const [systemConfiguration, setSystemConfiguration] = useState<SystemConfiguration>(DEFAULT_SYSTEM_CONFIGURATION);
 
-    // Helper function to load settings - DEFINED BEFORE USE
-    const loadSettings = useCallback(async () => {
-        try {
-            const sysDoc = await getDoc(doc(db, 'settings', 'system'));
-            if (sysDoc.exists()) setSystemSettings({ ...DEFAULT_SYSTEM_SETTINGS, ...sysDoc.data() } as SystemSettings);
-
-            const tradeDoc = await getDoc(doc(db, 'settings', 'trade'));
-            if (tradeDoc.exists()) setTradeSettings(tradeDoc.data() as TradeSettings);
-            
-            const currencyDoc = await getDoc(doc(db, 'settings', 'currencies'));
-            if (currencyDoc.exists()) setCryptoCurrencies(currencyDoc.data().list as CryptoCurrency[]);
-
-            const configDoc = await getDoc(doc(db, 'settings', 'configuration'));
-            if (configDoc.exists()) setSystemConfiguration(configDoc.data() as SystemConfiguration);
-        } catch (error) { console.warn("Error loading settings:", error); }
-    }, []);
-
     // 1. Initialize Auth Listener
     useEffect(() => {
         let mounted = true;
-        const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-            setFirebaseUser(currentUser);
-            
-            if (currentUser) {
-                try {
-                    const userDocRef = doc(db, 'users', currentUser.uid);
-                    const userSnapshot = await getDoc(userDocRef);
-                    
-                    if (userSnapshot.exists()) {
-                        const data = userSnapshot.data();
-                        const email = data.email || currentUser.email || '';
-                        const role = getRoleFromEmail(email, data.role);
-
-                        if(mounted) {
-                            setUser({ 
-                                id: currentUser.uid, 
-                                ...data,
-                                availableBalance: typeof data.availableBalance === 'number' ? data.availableBalance : 0,
-                                role: role,
-                                fullName: data.fullName || currentUser.displayName || 'User',
-                                email: email
-                            } as User);
-                        }
-                    } else {
-                        // Create doc if it doesn't exist
-                        const email = currentUser.email || '';
-                        const role = getRoleFromEmail(email);
-                        
-                        const newUser: User = {
-                            id: currentUser.uid,
-                            fullName: currentUser.displayName || 'User',
-                            email: email,
-                            role: role,
-                            availableBalance: Number(DEFAULT_SYSTEM_SETTINGS.newUserBalance) || 500,
-                            profilePictureUrl: currentUser.photoURL || '',
-                            status: 'Active',
-                            tradeHistory: [],
-                            openTrades: [],
-                            lastSeen: new Date().toISOString(),
-                            joinedAt: new Date().toISOString()
-                        };
-                        
-                        await setDoc(userDocRef, newUser);
-                        if(mounted) setUser(newUser);
-                    }
-                    await loadSettings();
-                } catch (e: any) {
-                    console.error("Error initializing user:", e);
-                    // Fallback
-                    const email = currentUser.email || '';
-                    if(mounted) {
-                        setUser({
-                            id: currentUser.uid,
-                            email: email,
-                            fullName: currentUser.displayName || 'User',
-                            role: getRoleFromEmail(email), 
-                            availableBalance: 0, 
-                            status: 'Active'
-                        } as User);
-                    }
-                }
-            } else {
-                if(mounted) {
-                    setUser(null);
-                    setAllUsers([]);
-                }
-            }
-            if(mounted) setLoading(false);
-        });
-
-        // Failsafe: If Firebase takes too long (e.g. network block), stop loading after 4s
+        
+        // Safety timeout to prevent infinite loading
         const safetyTimer = setTimeout(() => {
             if (mounted && loading) {
                 console.warn("Auth listener timed out, forcing app load.");
@@ -367,12 +281,107 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             }
         }, 4000);
 
+        // Defined inside useEffect to prevent hoisting/dependency issues
+        const loadSettings = async () => {
+            try {
+                const sysDoc = await getDoc(doc(db, 'settings', 'system'));
+                if (sysDoc.exists() && mounted) setSystemSettings({ ...DEFAULT_SYSTEM_SETTINGS, ...sysDoc.data() } as SystemSettings);
+
+                const tradeDoc = await getDoc(doc(db, 'settings', 'trade'));
+                if (tradeDoc.exists() && mounted) setTradeSettings(tradeDoc.data() as TradeSettings);
+                
+                const currencyDoc = await getDoc(doc(db, 'settings', 'currencies'));
+                if (currencyDoc.exists() && mounted) setCryptoCurrencies(currencyDoc.data().list as CryptoCurrency[]);
+
+                const configDoc = await getDoc(doc(db, 'settings', 'configuration'));
+                if (configDoc.exists() && mounted) setSystemConfiguration(configDoc.data() as SystemConfiguration);
+            } catch (error) { 
+                console.warn("Error loading settings:", error); 
+            }
+        };
+
+        const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+            try {
+                if (mounted) setFirebaseUser(currentUser);
+                
+                if (currentUser) {
+                    try {
+                        const userDocRef = doc(db, 'users', currentUser.uid);
+                        const userSnapshot = await getDoc(userDocRef);
+                        
+                        if (userSnapshot.exists()) {
+                            const data = userSnapshot.data();
+                            const email = data.email || currentUser.email || '';
+                            const role = getRoleFromEmail(email, data.role);
+
+                            if(mounted) {
+                                setUser({ 
+                                    id: currentUser.uid, 
+                                    ...data,
+                                    availableBalance: typeof data.availableBalance === 'number' ? data.availableBalance : 0,
+                                    role: role,
+                                    fullName: data.fullName || currentUser.displayName || 'User',
+                                    email: email
+                                } as User);
+                            }
+                        } else {
+                            // Create doc if it doesn't exist
+                            const email = currentUser.email || '';
+                            const role = getRoleFromEmail(email);
+                            
+                            const newUser: User = {
+                                id: currentUser.uid,
+                                fullName: currentUser.displayName || 'User',
+                                email: email,
+                                role: role,
+                                availableBalance: Number(DEFAULT_SYSTEM_SETTINGS.newUserBalance) || 500,
+                                profilePictureUrl: currentUser.photoURL || '',
+                                status: 'Active',
+                                tradeHistory: [],
+                                openTrades: [],
+                                lastSeen: new Date().toISOString(),
+                                joinedAt: new Date().toISOString()
+                            };
+                            
+                            await setDoc(userDocRef, newUser);
+                            if(mounted) setUser(newUser);
+                        }
+                    } catch (e: any) {
+                        console.error("Error initializing user:", e);
+                        // Fallback
+                        const email = currentUser.email || '';
+                        if(mounted) {
+                            setUser({
+                                id: currentUser.uid,
+                                email: email,
+                                fullName: currentUser.displayName || 'User',
+                                role: getRoleFromEmail(email), 
+                                availableBalance: 0, 
+                                status: 'Active'
+                            } as User);
+                        }
+                    }
+                    
+                    await loadSettings();
+                } else {
+                    if(mounted) {
+                        setUser(null);
+                        setAllUsers([]);
+                    }
+                }
+            } catch (err) {
+                console.error("Auth State Change Error:", err);
+            } finally {
+                if(mounted) setLoading(false);
+            }
+        });
+
         return () => {
             mounted = false;
             clearTimeout(safetyTimer);
             unsubscribe();
         };
-    }, [loadSettings]); // loadSettings is stable due to useCallback
+    }, []); // Run once on mount
 
     // 2. Live Data Listeners
     useEffect(() => {
