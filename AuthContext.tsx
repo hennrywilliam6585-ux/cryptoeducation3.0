@@ -1,5 +1,5 @@
 
-import React, { createContext, useState, useEffect, useContext, useMemo, useCallback } from 'react';
+import React, { createContext, useState, useEffect, useContext } from 'react';
 import { initializeApp, deleteApp } from "firebase/app";
 import { 
   createUserWithEmailAndPassword, 
@@ -19,6 +19,7 @@ import {
   collection, 
   addDoc, 
   query, 
+  orderBy,
   where,
   increment,
   runTransaction,
@@ -129,9 +130,8 @@ const DEFAULT_CRYPTO_DATA: CryptoCurrency[] = [
     { icon: 'https://cdn.jsdelivr.net/gh/atomiclabs/cryptocurrency-icons@1a63530be6e374711a8554f31b17e4cb92c25661/svg/color/usdt.svg', name: 'Tether', symbol: 'USDT', status: 'Enabled' },
     { icon: 'https://cdn.jsdelivr.net/gh/atomiclabs/cryptocurrency-icons@1a63530be6e374711a8554f31b17e4cb92c25661/svg/color/bnb.svg', name: 'BNB', symbol: 'BNB', status: 'Enabled' },
     { icon: 'https://cdn.jsdelivr.net/gh/atomiclabs/cryptocurrency-icons@1a63530be6e374711a8554f31b17e4cb92c25661/svg/color/usdc.svg', name: 'USD Coin', symbol: 'USDC', status: 'Enabled' },
-    { icon: 'https://cdn.jsdelivr.net/gh/atomiclabs/cryptocurrency-icons@1a63530be6e374711a8554f31b17e4cb92c25661/svg/color/xrp.svg', name: 'XRP', symbol: 'XRP', status: 'Enabled' },
+    { icon: 'https://cdn.jsdelivr.net/gh/atomiclabs/cryptocurrency-icons@1a63530be6e374711a8554f31b17e4cb92c25661/svg/color/xrp.svg', name: 'XRP', symbol: 'XRP', status: 'Disabled' },
     { icon: 'https://cdn.jsdelivr.net/gh/atomiclabs/cryptocurrency-icons@1a63530be6e374711a8554f31b17e4cb92c25661/svg/color/ada.svg', name: 'Cardano', symbol: 'ADA', status: 'Enabled' },
-    { icon: 'https://cdn.jsdelivr.net/gh/atomiclabs/cryptocurrency-icons@1a63530be6e374711a8554f31b17e4cb92c25661/svg/color/sol.svg', name: 'Solana', symbol: 'SOL', status: 'Enabled' },
 ];
 
 const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
@@ -172,6 +172,7 @@ const DEFAULT_SYSTEM_CONFIGURATION: SystemConfiguration = {
 };
 
 // --- Error Helper ---
+
 const handleSnapshotError = (error: any, context: string) => {
     if (error?.code === 'permission-denied' || error?.message?.includes('Missing or insufficient permissions')) {
         console.warn(`${context}: Permission denied. Your account might not have access to this data or the database rules are blocking access.`);
@@ -271,117 +272,74 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     // 1. Initialize Auth Listener
     useEffect(() => {
-        let mounted = true;
-        
-        // Safety timeout to prevent infinite loading
-        const safetyTimer = setTimeout(() => {
-            if (mounted && loading) {
-                console.warn("Auth listener timed out, forcing app load.");
-                setLoading(false);
-            }
-        }, 4000);
-
-        // Defined inside useEffect to prevent hoisting/dependency issues
-        const loadSettings = async () => {
-            try {
-                const sysDoc = await getDoc(doc(db, 'settings', 'system'));
-                if (sysDoc.exists() && mounted) setSystemSettings({ ...DEFAULT_SYSTEM_SETTINGS, ...sysDoc.data() } as SystemSettings);
-
-                const tradeDoc = await getDoc(doc(db, 'settings', 'trade'));
-                if (tradeDoc.exists() && mounted) setTradeSettings(tradeDoc.data() as TradeSettings);
-                
-                const currencyDoc = await getDoc(doc(db, 'settings', 'currencies'));
-                if (currencyDoc.exists() && mounted) setCryptoCurrencies(currencyDoc.data().list as CryptoCurrency[]);
-
-                const configDoc = await getDoc(doc(db, 'settings', 'configuration'));
-                if (configDoc.exists() && mounted) setSystemConfiguration(configDoc.data() as SystemConfiguration);
-            } catch (error) { 
-                console.warn("Error loading settings:", error); 
-            }
-        };
-
         const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-            try {
-                if (mounted) setFirebaseUser(currentUser);
-                
-                if (currentUser) {
-                    try {
-                        const userDocRef = doc(db, 'users', currentUser.uid);
-                        const userSnapshot = await getDoc(userDocRef);
-                        
-                        if (userSnapshot.exists()) {
-                            const data = userSnapshot.data();
-                            const email = data.email || currentUser.email || '';
-                            const role = getRoleFromEmail(email, data.role);
+            setFirebaseUser(currentUser);
+            if (currentUser) {
+                try {
+                    // Fetch user profile from Firestore
+                    const userDocRef = doc(db, 'users', currentUser.uid);
+                    const userSnapshot = await getDoc(userDocRef);
+                    
+                    if (userSnapshot.exists()) {
+                        const data = userSnapshot.data();
+                        const email = data.email || currentUser.email || '';
+                        // FORCE ADMIN ROLE based on email if pattern matches
+                        const role = getRoleFromEmail(email, data.role);
 
-                            if(mounted) {
-                                setUser({ 
-                                    id: currentUser.uid, 
-                                    ...data,
-                                    availableBalance: typeof data.availableBalance === 'number' ? data.availableBalance : 0,
-                                    role: role,
-                                    fullName: data.fullName || currentUser.displayName || 'User',
-                                    email: email
-                                } as User);
-                            }
-                        } else {
-                            // Create doc if it doesn't exist
-                            const email = currentUser.email || '';
-                            const role = getRoleFromEmail(email);
-                            
-                            const newUser: User = {
-                                id: currentUser.uid,
-                                fullName: currentUser.displayName || 'User',
-                                email: email,
-                                role: role,
-                                availableBalance: Number(DEFAULT_SYSTEM_SETTINGS.newUserBalance) || 500,
-                                profilePictureUrl: currentUser.photoURL || '',
-                                status: 'Active',
-                                tradeHistory: [],
-                                openTrades: [],
-                                lastSeen: new Date().toISOString(),
-                                joinedAt: new Date().toISOString()
-                            };
-                            
-                            await setDoc(userDocRef, newUser);
-                            if(mounted) setUser(newUser);
-                        }
-                    } catch (e: any) {
-                        console.error("Error initializing user:", e);
-                        // Fallback
+                        setUser({ 
+                            id: currentUser.uid, 
+                            ...data,
+                            // Ensure critical fields have defaults to prevent crashes
+                            availableBalance: typeof data.availableBalance === 'number' ? data.availableBalance : 0,
+                            role: role,
+                            fullName: data.fullName || currentUser.displayName || 'User',
+                            email: email
+                        } as User);
+                    } else {
+                        console.warn("User document not found for ID:", currentUser.uid);
+                        
                         const email = currentUser.email || '';
-                        if(mounted) {
-                            setUser({
-                                id: currentUser.uid,
-                                email: email,
-                                fullName: currentUser.displayName || 'User',
-                                role: getRoleFromEmail(email), 
-                                availableBalance: 0, 
-                                status: 'Active'
-                            } as User);
-                        }
+                        const role = getRoleFromEmail(email);
+
+                        setUser({
+                             id: currentUser.uid,
+                             email: email,
+                             fullName: currentUser.displayName || 'User',
+                             role: role, 
+                             availableBalance: 0,
+                             status: 'Active'
+                         } as User);
                     }
                     
-                    await loadSettings();
-                } else {
-                    if(mounted) {
-                        setUser(null);
-                        setAllUsers([]);
-                    }
-                }
-            } catch (err) {
-                console.error("Auth State Change Error:", err);
-            } finally {
-                if(mounted) setLoading(false);
-            }
-        });
+                    // Load settings once on auth
+                    loadSettings();
+                } catch (e: any) {
+                     if (e.code === 'permission-denied') {
+                        console.warn("Permission denied fetching profile. Using Auth fallback.");
+                     } else {
+                        console.error("Error fetching user profile or settings:", e);
+                     }
+                     
+                     const email = currentUser.email || '';
+                     const role = getRoleFromEmail(email);
 
-        return () => {
-            mounted = false;
-            clearTimeout(safetyTimer);
-            unsubscribe();
-        };
-    }, []); // Run once on mount
+                     setUser({
+                         id: currentUser.uid,
+                         email: email,
+                         fullName: currentUser.displayName || 'User',
+                         role: role, 
+                         availableBalance: 0, 
+                         status: 'Active'
+                     } as User);
+                }
+            } else {
+                setUser(null);
+                setAllUsers([]); 
+            }
+            setLoading(false);
+        });
+        return () => unsubscribe();
+    }, []);
 
     // 2. Live Data Listeners
     useEffect(() => {
@@ -395,20 +353,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     const email = data.email || firebaseUser.email || '';
                     const role = getRoleFromEmail(email, data.role);
 
-                    setUser(prev => {
-                         // Only update if data changed to avoid render loops
-                         const newUser = { 
-                            id: docSnap.id, 
-                            ...data,
-                            availableBalance: typeof data.availableBalance === 'number' ? data.availableBalance : 0,
-                            role: role,
-                            fullName: data.fullName || firebaseUser.displayName || 'User',
-                            email: email
-                        } as User;
-
-                        if (prev && JSON.stringify(prev) === JSON.stringify(newUser)) return prev;
-                        return newUser;
-                    });
+                    setUser({ 
+                        id: docSnap.id, 
+                        ...data,
+                        availableBalance: typeof data.availableBalance === 'number' ? data.availableBalance : 0,
+                        role: role,
+                        fullName: data.fullName || firebaseUser.displayName || 'User',
+                        email: email
+                    } as User);
                 }
             },
             (error) => handleSnapshotError(error, "Error listening to user profile")
@@ -423,68 +375,153 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     useEffect(() => {
         if (user?.role === 'admin') {
             const qUsers = query(collection(db, 'users'));
-            const unsubUsers = onSnapshot(qUsers, (snapshot) => {
-                const users = snapshot.docs.map(d => ({ 
-                    id: d.id, ...d.data(), availableBalance: d.data().availableBalance || 0 
-                } as User));
-                setAllUsers(users);
-            }, (error) => handleSnapshotError(error, "Error listening to all users"));
+            const unsubUsers = onSnapshot(
+                qUsers, 
+                (snapshot) => {
+                    const users = snapshot.docs.map(d => {
+                        const data = d.data();
+                        return { 
+                            id: d.id, 
+                            ...data,
+                            availableBalance: typeof data.availableBalance === 'number' ? data.availableBalance : 0
+                        } as User;
+                    });
+                    setAllUsers(users);
+                },
+                (error) => handleSnapshotError(error, "Error listening to all users")
+            );
 
             const qDeposits = query(collection(db, 'deposits'));
-            const unsubDeposits = onSnapshot(qDeposits, (snapshot) => {
-                setAllDeposits(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Deposit)));
-            }, (error) => handleSnapshotError(error, "Error listening to all deposits"));
+            const unsubDeposits = onSnapshot(
+                qDeposits, 
+                (snapshot) => {
+                    setAllDeposits(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Deposit)));
+                },
+                (error) => handleSnapshotError(error, "Error listening to all deposits")
+            );
 
             const qWithdrawals = query(collection(db, 'withdrawals'));
-            const unsubWithdrawals = onSnapshot(qWithdrawals, (snapshot) => {
-                setAllWithdrawals(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Withdrawal)));
-            }, (error) => handleSnapshotError(error, "Error listening to all withdrawals"));
+            const unsubWithdrawals = onSnapshot(
+                qWithdrawals, 
+                (snapshot) => {
+                    setAllWithdrawals(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Withdrawal)));
+                },
+                (error) => handleSnapshotError(error, "Error listening to all withdrawals")
+            );
 
             const qTickets = query(collection(db, 'tickets'));
-            const unsubTickets = onSnapshot(qTickets, (snapshot) => {
-                setAllSupportTickets(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as SupportTicket)));
-            }, (error) => handleSnapshotError(error, "Error listening to all tickets"));
+            const unsubTickets = onSnapshot(
+                qTickets, 
+                (snapshot) => {
+                    setAllSupportTickets(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as SupportTicket)));
+                },
+                (error) => handleSnapshotError(error, "Error listening to all tickets")
+            );
 
             const qSubscribers = query(collection(db, 'subscribers'));
-            const unsubSubscribers = onSnapshot(qSubscribers, (snapshot) => {
-                setAllSubscribers(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Subscriber)));
-            }, (error) => handleSnapshotError(error, "Error listening to all subscribers"));
+            const unsubSubscribers = onSnapshot(
+                qSubscribers, 
+                (snapshot) => {
+                    setAllSubscribers(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Subscriber)));
+                },
+                (error) => handleSnapshotError(error, "Error listening to all subscribers")
+            );
 
-            return () => { unsubUsers(); unsubDeposits(); unsubWithdrawals(); unsubTickets(); unsubSubscribers(); };
+            return () => {
+                unsubUsers();
+                unsubDeposits();
+                unsubWithdrawals();
+                unsubTickets();
+                unsubSubscribers();
+            };
         } else if (user?.role === 'user') {
              const qDeposits = query(collection(db, 'deposits'), where('userId', '==', user.id));
-             const unsubDeposits = onSnapshot(qDeposits, (snapshot) => {
-                setAllDeposits(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Deposit)));
-             }, (error) => handleSnapshotError(error, "Error listening to user deposits"));
+             const unsubDeposits = onSnapshot(
+                qDeposits, 
+                (snapshot) => {
+                    setAllDeposits(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Deposit)));
+                },
+                (error) => handleSnapshotError(error, "Error listening to user deposits")
+             );
 
              const qWithdrawals = query(collection(db, 'withdrawals'), where('userId', '==', user.id));
-             const unsubWithdrawals = onSnapshot(qWithdrawals, (snapshot) => {
-                setAllWithdrawals(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Withdrawal)));
-             }, (error) => handleSnapshotError(error, "Error listening to user withdrawals"));
+             const unsubWithdrawals = onSnapshot(
+                qWithdrawals, 
+                (snapshot) => {
+                    setAllWithdrawals(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Withdrawal)));
+                },
+                (error) => handleSnapshotError(error, "Error listening to user withdrawals")
+             );
 
              const qTickets = query(collection(db, 'tickets'), where('userId', '==', user.id));
-             const unsubTickets = onSnapshot(qTickets, (snapshot) => {
-                setAllSupportTickets(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as SupportTicket)));
-             }, (error) => handleSnapshotError(error, "Error listening to user tickets"));
+             const unsubTickets = onSnapshot(
+                qTickets, 
+                (snapshot) => {
+                    setAllSupportTickets(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as SupportTicket)));
+                },
+                (error) => handleSnapshotError(error, "Error listening to user tickets")
+             );
              
-             return () => { unsubDeposits(); unsubWithdrawals(); unsubTickets(); };
+             return () => {
+                unsubDeposits();
+                unsubWithdrawals();
+                unsubTickets();
+             };
         }
     }, [user?.role, user?.id]);
+
+    // Load Settings Function
+    const loadSettings = async () => {
+        try {
+            const sysDoc = await getDoc(doc(db, 'settings', 'system'));
+            if (sysDoc.exists()) {
+                // Merge defaults with fetched data to ensure new fields exist
+                setSystemSettings({ ...DEFAULT_SYSTEM_SETTINGS, ...sysDoc.data() } as SystemSettings);
+            } else if (auth.currentUser) {
+                try { await setDoc(doc(db, 'settings', 'system'), DEFAULT_SYSTEM_SETTINGS); } catch(e) {}
+            }
+
+            const tradeDoc = await getDoc(doc(db, 'settings', 'trade'));
+            if (tradeDoc.exists()) setTradeSettings(tradeDoc.data() as TradeSettings);
+             else if (auth.currentUser) {
+                try { await setDoc(doc(db, 'settings', 'trade'), DEFAULT_TRADE_SETTINGS); } catch(e) {}
+            }
+            
+            const currencyDoc = await getDoc(doc(db, 'settings', 'currencies'));
+            if (currencyDoc.exists()) setCryptoCurrencies(currencyDoc.data().list as CryptoCurrency[]);
+             else if (auth.currentUser) {
+                 try { await setDoc(doc(db, 'settings', 'currencies'), { list: DEFAULT_CRYPTO_DATA }); } catch(e) {}
+            }
+
+            const configDoc = await getDoc(doc(db, 'settings', 'configuration'));
+            if (configDoc.exists()) setSystemConfiguration(configDoc.data() as SystemConfiguration);
+            else if (auth.currentUser) {
+                try { await setDoc(doc(db, 'settings', 'configuration'), DEFAULT_SYSTEM_CONFIGURATION); } catch(e) {}
+            }
+        } catch (error) {
+            console.warn("Error loading settings:", error);
+        }
+    };
     
     // Notification Listener
     useEffect(() => {
         if(user?.id) {
             let q;
             if (user.role === 'admin') {
+                // Admins see their own notifications + 'admin' targeted notifications
                 q = query(collection(db, 'notifications'), where('userId', 'in', [user.id, 'admin']));
             } else {
                 q = query(collection(db, 'notifications'), where('userId', '==', user.id));
             }
             
-            const unsub = onSnapshot(q, (snapshot) => {
-                const notifs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Notification));
-                setAllNotifications(notifs.sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()));
-            }, (error) => handleSnapshotError(error, "Error listening to notifications"));
+            const unsub = onSnapshot(
+                q, 
+                (snapshot) => {
+                    const notifs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Notification));
+                    setAllNotifications(notifs.sort((a,b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()));
+                },
+                (error) => handleSnapshotError(error, "Error listening to notifications")
+            );
             return () => unsub();
         }
     }, [user?.id, user?.role]);
@@ -493,8 +530,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // --- Actions ---
 
     const addNotification = async (userId: string, title: string, message: string, type: 'success' | 'info' | 'warning' | 'error') => {
-        const newNotif = { userId, title, message, type, timestamp: new Date().toISOString(), read: false };
-        try { await addDoc(collection(db, 'notifications'), newNotif); } catch (error) { console.warn("Error adding notification:", error); }
+        const newNotif = {
+            userId,
+            title,
+            message,
+            type,
+            timestamp: new Date().toISOString(),
+            read: false
+        };
+        try {
+             await addDoc(collection(db, 'notifications'), newNotif);
+        } catch (error) { console.warn("Error adding notification:", error); }
     };
 
     const updateGeneralSettings = async (settings: SystemSettings) => {
@@ -541,9 +587,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 joinedAt: new Date().toISOString()
             };
             
-            await setDoc(doc(db, 'users', userCredential.user.uid), newUser);
-            setUser(newUser);
-            await addNotification('admin', 'New User Registered', `User ${fullName} (${email}) has joined.`, 'info');
+            try {
+                await setDoc(doc(db, 'users', userCredential.user.uid), newUser);
+                // Pre-set user to avoid flash on redirect
+                setUser(newUser);
+                // Notify Admin of new user
+                await addNotification('admin', 'New User Registered', `User ${fullName} (${email}) has joined.`, 'info');
+            } catch (e) {
+                console.warn("Created user in Auth but failed to create Firestore doc.");
+            }
             
             return { success: true, message: 'Account created successfully.' };
         } catch (error: any) {
@@ -554,17 +606,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const login = async (email: string, password: string) => {
         try {
             const userCredential = await signInWithEmailAndPassword(auth, email, password);
-            const uid = userCredential.user.uid;
             
+            // Manually fetch and set user to update state BEFORE navigation happens
+            // This prevents the redirect "flash" where auth state isn't ready yet
+            const uid = userCredential.user.uid;
             const userDocRef = doc(db, 'users', uid);
             const userSnapshot = await getDoc(userDocRef);
             
             let userData: User;
+            
             if (userSnapshot.exists()) {
                 const data = userSnapshot.data();
                 const role = getRoleFromEmail(email, data.role);
                 userData = { 
-                    id: uid, ...data,
+                    id: uid, 
+                    ...data,
                     availableBalance: typeof data.availableBalance === 'number' ? data.availableBalance : 0,
                     role: role,
                     fullName: data.fullName || userCredential.user.displayName || 'User',
@@ -573,11 +629,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             } else {
                  const role = getRoleFromEmail(email);
                  userData = {
-                     id: uid, email,
+                     id: uid,
+                     email: email,
                      fullName: userCredential.user.displayName || 'User',
-                     role: role, availableBalance: 0, status: 'Active'
+                     role: role, 
+                     availableBalance: 0, 
+                     status: 'Active'
                  } as User;
-                 await setDoc(userDocRef, userData);
             }
             
             setUser(userData);
@@ -592,28 +650,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             const userCredential = await signInWithEmailAndPassword(auth, email, password);
             const role = getRoleFromEmail(email);
             
-            let userData: User;
+            // Pre-fetch check and state update
             if (role === 'admin') {
-                 userData = { id: userCredential.user.uid, email, fullName: 'Admin', role: 'admin', availableBalance: 0 } as User;
-            } else {
-                const userDoc = await getDoc(doc(db, 'users', userCredential.user.uid));
-                if(userDoc.exists() && userDoc.data().role === 'admin') {
-                    const data = userDoc.data();
-                    userData = { 
-                        id: userCredential.user.uid, ...data,
-                        availableBalance: typeof data.availableBalance === 'number' ? data.availableBalance : 0,
-                        role: 'admin',
-                        fullName: data.fullName || 'Admin',
-                        email
-                    } as User;
-                } else {
-                    await signOut(auth);
-                    return { success: false, message: 'Access denied. Not an admin.' };
-                }
+                 setUser({
+                     id: userCredential.user.uid,
+                     email: email,
+                     fullName: 'Admin',
+                     role: 'admin',
+                     availableBalance: 0
+                 } as User);
+                 return { success: true, message: 'Admin login successful.' };
             }
 
-            setUser(userData);
-            return { success: true, message: 'Admin login successful.' };
+            const userDoc = await getDoc(doc(db, 'users', userCredential.user.uid));
+            if(userDoc.exists() && userDoc.data().role === 'admin') {
+                const data = userDoc.data();
+                setUser({ 
+                    id: userCredential.user.uid, 
+                    ...data,
+                    availableBalance: typeof data.availableBalance === 'number' ? data.availableBalance : 0,
+                    role: 'admin',
+                    fullName: data.fullName || 'Admin',
+                    email: email
+                } as User);
+                return { success: true, message: 'Admin login successful.' };
+            } else {
+                await signOut(auth);
+                setUser(null);
+                return { success: false, message: 'Access denied. Not an admin.' };
+            }
         } catch (error: any) {
              return { success: false, message: getFriendlyErrorMessage(error) };
         }
@@ -621,21 +686,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const logout = async () => {
         await signOut(auth);
-        setUser(null);
     };
 
     const adjustBalance = async (amount: number) => {
         if (user) {
-            try { 
-                const userRef = doc(db, 'users', user.id);
-                const snap = await getDoc(userRef);
-                if (!snap.exists()) {
-                    await setDoc(userRef, user);
-                }
-                await updateDoc(userRef, { availableBalance: increment(amount) }); 
-            } catch (error) { 
-                console.error("Error adjusting balance", error); 
-            }
+            try {
+                await updateDoc(doc(db, 'users', user.id), { availableBalance: increment(amount) });
+            } catch (error) { console.error("Error adjusting balance", error); }
         }
     };
 
@@ -646,15 +703,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         try {
             const userRef = doc(db, 'users', user.id);
             const userSnap = await getDoc(userRef);
-            
-            if (!userSnap.exists()) {
-                await setDoc(userRef, user);
-            }
-
-            const userData = userSnap.exists() ? userSnap.data() : user;
+            if (!userSnap.exists()) throw new Error("User not found");
+            const userData = userSnap.data();
             const newOpenTrades = [trade, ...(userData.openTrades || [])];
             
-            await updateDoc(userRef, { availableBalance: increment(-amount), openTrades: newOpenTrades });
+            await updateDoc(userRef, {
+                availableBalance: increment(-amount),
+                openTrades: newOpenTrades
+            });
+
             return { success: true, message: 'Trade placed successfully' };
         } catch (error) {
             return { success: false, message: getFriendlyErrorMessage(error) };
@@ -666,11 +723,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const setOpenTrades = async (trades: OpenTrade[]) => {
         if (!user) return;
-        try { await updateDoc(doc(db, 'users', user.id), { openTrades: trades }); } catch (error) { console.error("Error setting open trades", error); }
+        try {
+            await updateDoc(doc(db, 'users', user.id), { openTrades: trades });
+        } catch (error) { console.error("Error setting open trades", error); }
     };
 
     const resolveTrades = async (results: { tradeId: string, log: UserTradeLog, payout: number }[]) => {
         if (!user) return;
+        
         try {
             const userRef = doc(db, 'users', user.id);
             const userSnap = await getDoc(userRef);
@@ -696,7 +756,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     availableBalance: increment(balanceToAdd)
                 });
             }
-        } catch (error) { console.error("Error resolving trades:", error); }
+        } catch (error) {
+            console.error("Error resolving trades:", error);
+        }
     };
 
     const toggleCryptoStatus = async (symbol: string) => {
@@ -735,12 +797,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             
             const userCredential = await createUserWithEmailAndPassword(secondaryAuth, userData.email, userData.password);
             const newUserId = userCredential.user.uid;
-            
+            const role = 'user'; 
+
             const newUser: User = {
                 id: newUserId,
                 fullName: userData.fullName,
                 email: userData.email,
-                role: 'user',
+                role: role,
                 availableBalance: Number(userData.availableBalance) || 0,
                 profilePictureUrl: '',
                 status: 'Active',
@@ -752,6 +815,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
             await setDoc(doc(db, 'users', newUserId), newUser);
             await signOut(secondaryAuth);
+
             return { success: true, message: 'User added successfully.' };
         } catch (error: any) {
             return { success: false, message: getFriendlyErrorMessage(error) };
@@ -771,6 +835,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
     };
 
+    // Atomic balance update
     const modifyUserBalance = async (userId: string, amount: number) => {
         try {
             const userRef = doc(db, 'users', userId);
@@ -793,16 +858,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 const newDepositRef = doc(db, 'deposits', newDepositId);
 
                 const newDeposit: Deposit = {
-                    id: newDepositId, userId: userId,
-                    userName: userData.fullName || 'User', userEmail: userData.email || '',
+                    id: newDepositId,
+                    userId: userId,
+                    userName: userData.fullName || 'User',
+                    userEmail: userData.email || '',
                     gateway: 'System (Manual)',
                     logo: 'https://img.icons8.com/fluency/48/000000/bank.png',
-                    amount: amount, initiated: new Date().toISOString(), status: 'Successful'
+                    amount: amount,
+                    initiated: new Date().toISOString(),
+                    status: 'Successful'
                 };
                 
                 transaction.set(newDepositRef, newDeposit);
                 transaction.update(userRef, { availableBalance: increment(amount) });
             });
+
             await addNotification(userId, 'Deposit Received', `System added deposit of $${amount}.`, 'success');
             return { success: true, message: 'Manual deposit added successfully.' };
         } catch (error) {
@@ -821,11 +891,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const updateProfile = async (profileData: Partial<User>) => {
         if (!user) return { success: false, message: 'Not authenticated' };
         try {
-            const userRef = doc(db, 'users', user.id);
-            const snap = await getDoc(userRef);
-            if (!snap.exists()) await setDoc(userRef, user);
-            
-            await updateDoc(userRef, profileData);
+            await updateDoc(doc(db, 'users', user.id), profileData);
             return { success: true, message: 'Profile updated successfully.' };
         } catch (error) {
             return { success: false, message: getFriendlyErrorMessage(error) };
@@ -847,10 +913,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         try {
             const newDeposit: Deposit = {
                 id: `dep-${Date.now()}`,
-                userId: user.id, userName: user.fullName, userEmail: user.email,
-                gateway, logo, amount, initiated: new Date().toISOString(), status: 'Pending'
+                userId: user.id,
+                userName: user.fullName,
+                userEmail: user.email,
+                gateway,
+                logo,
+                amount,
+                initiated: new Date().toISOString(),
+                status: 'Pending'
             };
             await setDoc(doc(db, 'deposits', newDeposit.id), newDeposit);
+            // New: Notify Admin
             await addNotification('admin', 'New Deposit Request', `User ${user.fullName} requested deposit of $${amount} via ${gateway}.`, 'info');
             return { success: true, message: 'Deposit request submitted.' };
         } catch (error) {
@@ -865,17 +938,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 const depositDoc = await transaction.get(depositRef);
                 if (!depositDoc.exists()) throw "Deposit not found";
                 const deposit = depositDoc.data() as Deposit;
+                
                 if (deposit.status !== 'Pending') throw "Already processed";
 
                 const userRef = doc(db, 'users', deposit.userId);
-                const userDoc = await transaction.get(userRef);
-                if (!userDoc.exists()) {
-                     throw "User not found";
-                }
                 
                 transaction.update(depositRef, { status: 'Successful' });
                 transaction.update(userRef, { availableBalance: increment(deposit.amount) });
             });
+
             try {
                 const depositSnap = await getDoc(doc(db, 'deposits', depositId));
                 if (depositSnap.exists()) {
@@ -883,9 +954,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     await addNotification(deposit.userId, 'Deposit Approved', `Your deposit of $${deposit.amount} is approved.`, 'success');
                 }
             } catch(e) {}
+
             return { success: true, message: 'Deposit approved.' };
         } catch (error) {
-            return { success: false, message: getFriendlyErrorMessage(error) };
+            const msg = typeof error === 'string' ? error : getFriendlyErrorMessage(error);
+            return { success: false, message: msg };
         }
     };
 
@@ -905,14 +978,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const requestWithdrawal = async (withdrawalData: any) => {
         if (!user) return { success: false, message: "Login required" };
         if (user.availableBalance < withdrawalData.amount) return { success: false, message: "Insufficient balance" };
+
         try {
             await modifyUserBalance(user.id, -withdrawalData.amount);
+
             const newWithdrawal: Withdrawal = {
                 id: `with-${Date.now()}`,
-                userId: user.id, userName: user.fullName, userEmail: user.email,
-                initiated: new Date().toISOString(), status: 'Pending', ...withdrawalData
+                userId: user.id,
+                userName: user.fullName,
+                userEmail: user.email,
+                initiated: new Date().toISOString(),
+                status: 'Pending',
+                ...withdrawalData
             };
             await setDoc(doc(db, 'withdrawals', newWithdrawal.id), newWithdrawal);
+             // New: Notify Admin
              await addNotification('admin', 'New Withdrawal Request', `User ${user.fullName} requested withdrawal of $${withdrawalData.amount}.`, 'warning');
             return { success: true, message: 'Withdrawal request submitted.' };
         } catch (error) {
@@ -935,6 +1015,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const rejectWithdrawal = async (withdrawalId: string) => {
         const w = allWithdrawals.find(x => x.id === withdrawalId);
         if (!w) return { success: false, message: "Not found" };
+        
         try {
             await updateDoc(doc(db, 'withdrawals', withdrawalId), { status: 'Cancelled' });
             await modifyUserBalance(w.userId, w.amount);
@@ -951,10 +1032,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         try {
             const newTicket: SupportTicket = {
                 id: `ticket-${Date.now()}`,
-                userId: user.id, userName: user.fullName, userEmail: user.email,
-                status: 'Open', lastReply: new Date().toISOString(), ...ticketData
+                userId: user.id,
+                userName: user.fullName,
+                userEmail: user.email,
+                status: 'Open',
+                lastReply: new Date().toISOString(),
+                ...ticketData
             };
             await setDoc(doc(db, 'tickets', newTicket.id), newTicket);
+            // New: Notify Admin
             await addNotification('admin', 'New Support Ticket', `Ticket #${newTicket.id} created by ${user.fullName}.`, 'info');
             return { success: true, message: 'Ticket created.' };
         } catch (error) {
@@ -965,15 +1051,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const replyToSupportTicket = async (ticketId: string, messageText: string) => {
         const ticket = allSupportTickets.find(t => t.id === ticketId);
         if (!ticket) return { success: false, message: "Ticket not found" };
+
         try {
             const sender: 'user' | 'admin' = user?.role === 'admin' ? 'admin' : 'user';
             const newMessage: TicketMessage = { sender, text: messageText, timestamp: new Date().toISOString() };
             const newStatus: SupportTicket['status'] = user?.role === 'admin' ? 'Answered' : 'Customer-Reply';
 
             await updateDoc(doc(db, 'tickets', ticketId), {
-                messages: [...ticket.messages, newMessage], status: newStatus, lastReply: new Date().toISOString()
+                messages: [...ticket.messages, newMessage],
+                status: newStatus,
+                lastReply: new Date().toISOString()
             });
+
             if (sender === 'admin') await addNotification(ticket.userId, 'Ticket Reply', `Admin replied to your ticket.`, 'info');
+
             return { success: true, message: 'Reply sent.' };
         } catch (error) {
             return { success: false, message: getFriendlyErrorMessage(error) };
@@ -989,15 +1080,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
     };
 
-    // --- Notifications & Subs ---
+    // --- Notifications ---
     const markNotificationAsRead = async (id: string) => {
-        try { await updateDoc(doc(db, 'notifications', id), { read: true }); } catch (e) { console.warn("Error marking read", e); }
+        try {
+            await updateDoc(doc(db, 'notifications', id), { read: true });
+        } catch (e) { console.warn("Error marking read", e); }
     };
 
     const markAllAsRead = async () => {
         if(allNotifications.length > 0) {
             allNotifications.forEach(async (n) => {
-                if(!n.read) try { await updateDoc(doc(db, 'notifications', n.id), { read: true }); } catch(e){}
+                if(!n.read) {
+                     try { await updateDoc(doc(db, 'notifications', n.id), { read: true }); } catch(e){}
+                }
             });
         }
     };
@@ -1006,15 +1101,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (!user) return;
         try {
             let q;
-            if (user.role === 'admin') q = query(collection(db, 'notifications'), where('userId', 'in', [user.id, 'admin']));
-            else q = query(collection(db, 'notifications'), where('userId', '==', user.id));
+            if (user.role === 'admin') {
+                 q = query(collection(db, 'notifications'), where('userId', 'in', [user.id, 'admin']));
+            } else {
+                 q = query(collection(db, 'notifications'), where('userId', '==', user.id));
+            }
             const snapshot = await getDocs(q);
             const batch = writeBatch(db);
             snapshot.docs.forEach(d => batch.delete(d.ref));
             await batch.commit();
-        } catch (error) { console.error("Error clearing notifications", error); }
+        } catch (error) {
+            console.error("Error clearing notifications", error);
+        }
     };
 
+    // --- Subscribers ---
     const deleteSubscriber = async (id: string) => {
         try {
             await deleteDoc(doc(db, 'subscribers', id));
@@ -1024,25 +1125,47 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
     };
 
+    // --- Database Restore ---
     const restoreDatabase = async (data: any) => {
         try {
             let batch = writeBatch(db);
             let count = 0;
             let total = 0;
 
-            const commitAndReset = async () => { await batch.commit(); batch = writeBatch(db); count = 0; }
-            const safeSet = async (ref: any, docData: any) => {
-                batch.set(ref, docData);
-                count++; total++;
-                if (count >= 450) await commitAndReset();
+            const commitAndReset = async () => {
+                await batch.commit();
+                batch = writeBatch(db);
+                count = 0;
             }
 
-            if (Array.isArray(data.users)) for (const u of data.users) await safeSet(doc(db, 'users', u.id), u);
-            if (Array.isArray(data.deposits)) for (const d of data.deposits) await safeSet(doc(db, 'deposits', d.id), d);
-            if (Array.isArray(data.withdrawals)) for (const w of data.withdrawals) await safeSet(doc(db, 'withdrawals', w.id), w);
-            if (Array.isArray(data.tickets)) for (const t of data.tickets) await safeSet(doc(db, 'tickets', t.id), t);
-            if (Array.isArray(data.notifications)) for (const n of data.notifications) await safeSet(doc(db, 'notifications', n.id), n);
-            if (Array.isArray(data.subscribers)) for (const s of data.subscribers) await safeSet(doc(db, 'subscribers', s.id), s);
+            const safeSet = async (ref: any, docData: any) => {
+                batch.set(ref, docData);
+                count++;
+                total++;
+                if (count >= 450) {
+                    await commitAndReset();
+                }
+            }
+
+            // Process collections sequantially to respect batch logic (await inside loop)
+            if (Array.isArray(data.users)) {
+                for (const u of data.users) await safeSet(doc(db, 'users', u.id), u);
+            }
+            if (Array.isArray(data.deposits)) {
+                for (const d of data.deposits) await safeSet(doc(db, 'deposits', d.id), d);
+            }
+            if (Array.isArray(data.withdrawals)) {
+                for (const w of data.withdrawals) await safeSet(doc(db, 'withdrawals', w.id), w);
+            }
+            if (Array.isArray(data.tickets)) {
+                for (const t of data.tickets) await safeSet(doc(db, 'tickets', t.id), t);
+            }
+            if (Array.isArray(data.notifications)) {
+                for (const n of data.notifications) await safeSet(doc(db, 'notifications', n.id), n);
+            }
+            if (Array.isArray(data.subscribers)) {
+                for (const s of data.subscribers) await safeSet(doc(db, 'subscribers', s.id), s);
+            }
             
             if (data.systemSettings) await safeSet(doc(db, 'settings', 'system'), data.systemSettings);
             if (data.tradeSettings) await safeSet(doc(db, 'settings', 'trade'), data.tradeSettings);
@@ -1050,35 +1173,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             if (data.configuration) await safeSet(doc(db, 'settings', 'configuration'), data.configuration);
 
             if (count > 0) await batch.commit();
+            
             return { success: true, message: `Database restored with ${total} records updated.` };
         } catch (error) {
             return { success: false, message: getFriendlyErrorMessage(error) };
         }
     };
 
-    const value = useMemo(() => ({
-        user, isAuthenticated: !!user, loading, systemSettings, tradeSettings, systemConfiguration,
-        updateGeneralSettings, updateTradeSettings, updateSystemConfiguration,
-        signup, login, adminLogin, logout,
-        adjustBalance, placeTrade, modifyUserBalance, addManualDeposit, giveBonus, updateProfile, updateUserData,
-        addTradeToHistory, addOpenTrade, setOpenTrades, resolveTrades,
-        cryptoCurrencies, toggleCryptoStatus, addCrypto,
-        allUsers, toggleUserStatus, addUser, deleteUser,
-        allDeposits, requestDeposit, approveDeposit, rejectDeposit,
-        allWithdrawals, requestWithdrawal, approveWithdrawal, rejectWithdrawal,
-        allSupportTickets, openSupportTicket, replyToSupportTicket, changeTicketStatus,
-        notifications: allNotifications,
-        markNotificationAsRead, markAllAsRead, clearAllNotifications,
-        allSubscribers, deleteSubscriber,
-        restoreDatabase
-    }), [
-        user, loading, systemSettings, tradeSettings, systemConfiguration, 
-        allUsers, allDeposits, allWithdrawals, allSupportTickets, allNotifications, allSubscribers,
-        cryptoCurrencies
-    ]);
-
     return (
-        <AuthContext.Provider value={value}>
+        <AuthContext.Provider value={{
+            user, isAuthenticated: !!user, loading, systemSettings, tradeSettings, systemConfiguration,
+            updateGeneralSettings, updateTradeSettings, updateSystemConfiguration,
+            signup, login, adminLogin, logout,
+            adjustBalance, placeTrade, modifyUserBalance, addManualDeposit, giveBonus, updateProfile, updateUserData,
+            addTradeToHistory, addOpenTrade, setOpenTrades, resolveTrades,
+            cryptoCurrencies, toggleCryptoStatus, addCrypto,
+            allUsers, toggleUserStatus, addUser, deleteUser,
+            allDeposits, requestDeposit, approveDeposit, rejectDeposit,
+            allWithdrawals, requestWithdrawal, approveWithdrawal, rejectWithdrawal,
+            allSupportTickets, openSupportTicket, replyToSupportTicket, changeTicketStatus,
+            notifications: allNotifications,
+            markNotificationAsRead, markAllAsRead, clearAllNotifications,
+            allSubscribers, deleteSubscriber,
+            restoreDatabase
+        }}>
             {children}
         </AuthContext.Provider>
     );
